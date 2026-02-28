@@ -434,6 +434,7 @@ Rules are evaluated at two points:
 - **Per TCP CONNECT / UDP request:** Checks `destination_port`. Rules without `destination_port` are skipped.
 
 Within each evaluation:
+
 1. Rules are evaluated in order
 2. First matching rule's action is applied
 3. If no rules match, connection is **allowed** by default

@@ -194,10 +194,7 @@ impl forwarder::UdpDatagramPipeShared for MultiplexerShared {
                     if rules_engine.evaluate_destination(port) == rules::RuleEvaluation::Deny {
                         return Err(io::Error::new(
                             ErrorKind::PermissionDenied,
-                            format!(
-                                "UDP destination port {} denied by filtering rules",
-                                port
-                            ),
+                            format!("UDP destination port {} denied by filtering rules", port),
                         ));
                     }
                 }
