@@ -10,6 +10,50 @@ pub enum RuleAction {
     Deny,
 }
 
+/// Parsed destination port filter
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestinationPortFilter {
+    Single(u16),
+    Range(u16, u16),
+}
+
+impl DestinationPortFilter {
+    /// Parse a port filter string like "6881" or "6881-6889"
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if let Some((start_str, end_str)) = s.split_once('-') {
+            let start: u16 = start_str
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid port range start: '{}'", start_str.trim()))?;
+            let end: u16 = end_str
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid port range end: '{}'", end_str.trim()))?;
+            if start > end {
+                return Err(format!(
+                    "Port range start ({}) must be <= end ({})",
+                    start, end
+                ));
+            }
+            Ok(DestinationPortFilter::Range(start, end))
+        } else {
+            let port: u16 = s
+                .trim()
+                .parse()
+                .map_err(|_| format!("Invalid port: '{}'", s.trim()))?;
+            Ok(DestinationPortFilter::Single(port))
+        }
+    }
+
+    /// Check if a port matches this filter
+    pub fn matches(&self, port: u16) -> bool {
+        match self {
+            DestinationPortFilter::Single(p) => port == *p,
+            DestinationPortFilter::Range(start, end) => port >= *start && port <= *end,
+        }
+    }
+}
+
 /// Individual filter rule
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
@@ -23,6 +67,11 @@ pub struct Rule {
     /// If no mask, uses prefix matching
     #[serde(default)]
     pub client_random_prefix: Option<String>,
+
+    /// Destination port or port range to match (e.g. "6881" or "6881-6889")
+    /// Rules with this field are evaluated per-request, not at TLS handshake.
+    #[serde(default)]
+    pub destination_port: Option<String>,
 
     /// Action to take when this rule matches
     pub action: RuleAction,
@@ -49,6 +98,22 @@ pub enum RuleEvaluation {
 }
 
 impl Rule {
+    /// Check if this rule uses destination port filtering
+    pub fn has_destination_port(&self) -> bool {
+        self.destination_port.is_some()
+    }
+
+    /// Check if the given port matches this rule's destination_port filter
+    pub fn matches_destination_port(&self, port: u16) -> bool {
+        match &self.destination_port {
+            Some(port_str) => match DestinationPortFilter::parse(port_str) {
+                Ok(filter) => filter.matches(port),
+                Err(_) => false, // Invalid filter doesn't match
+            },
+            None => true, // No port filter means it matches any port
+        }
+    }
+
     /// Check if this rule matches the given connection parameters
     pub fn matches(&self, client_ip: &IpAddr, client_random: Option<&[u8]>) -> bool {
         let mut matches = true;
@@ -128,20 +193,25 @@ impl RulesEngine {
         }
     }
 
-    /// Evaluate connection against all rules
-    /// Returns the action from the first matching rule, or Allow if no rules match
+    /// Evaluate connection against all rules at TLS handshake time.
+    /// Skips rules that have destination_port set.
+    /// Returns the action from the first matching rule, or Allow if no rules match.
     pub fn evaluate(&self, client_ip: &IpAddr, client_random: Option<&[u8]>) -> RuleEvaluation {
         if client_random.is_none()
             && self
                 .rules
                 .rule
                 .iter()
-                .any(|r| r.client_random_prefix.is_some())
+                .any(|r| r.client_random_prefix.is_some() && !r.has_destination_port())
         {
             return RuleEvaluation::Deny;
         }
 
         for rule in &self.rules.rule {
+            // Skip destination port rules — they are evaluated per-request
+            if rule.has_destination_port() {
+                continue;
+            }
             if rule.matches(client_ip, client_random) {
                 return match rule.action {
                     RuleAction::Allow => RuleEvaluation::Allow,
@@ -151,6 +221,26 @@ impl RulesEngine {
         }
 
         // Default action if no rules match: allow
+        RuleEvaluation::Allow
+    }
+
+    /// Evaluate destination port against rules (per TCP CONNECT / UDP request)
+    /// Only considers rules that have destination_port set.
+    /// Returns Allow if no destination port rules match.
+    pub fn evaluate_destination(&self, port: u16) -> RuleEvaluation {
+        for rule in &self.rules.rule {
+            if !rule.has_destination_port() {
+                continue;
+            }
+            if rule.matches_destination_port(port) {
+                return match rule.action {
+                    RuleAction::Allow => RuleEvaluation::Allow,
+                    RuleAction::Deny => RuleEvaluation::Deny,
+                };
+            }
+        }
+
+        // Default: allow if no destination port rules match
         RuleEvaluation::Allow
     }
 
@@ -170,6 +260,7 @@ mod tests {
         let rule = Rule {
             cidr: Some("192.168.1.0/24".to_string()),
             client_random_prefix: None,
+            destination_port: None,
             action: RuleAction::Allow,
         };
 
@@ -185,6 +276,7 @@ mod tests {
         let rule = Rule {
             cidr: None,
             client_random_prefix: Some("aabbcc".to_string()),
+            destination_port: None,
             action: RuleAction::Deny,
         };
 
@@ -203,6 +295,7 @@ mod tests {
         let rule = Rule {
             cidr: Some("10.0.0.0/8".to_string()),
             client_random_prefix: Some("ff".to_string()),
+            destination_port: None,
             action: RuleAction::Allow,
         };
 
@@ -225,16 +318,19 @@ mod tests {
                 Rule {
                     cidr: Some("192.168.1.0/24".to_string()),
                     client_random_prefix: None,
+                    destination_port: None,
                     action: RuleAction::Deny,
                 },
                 Rule {
                     cidr: Some("10.0.0.0/8".to_string()),
                     client_random_prefix: None,
+                    destination_port: None,
                     action: RuleAction::Allow,
                 },
                 Rule {
                     cidr: None,
                     client_random_prefix: None,
+                    destination_port: None,
                     action: RuleAction::Deny, // Catch-all deny
                 },
             ],
@@ -257,6 +353,7 @@ mod tests {
             rule: vec![Rule {
                 cidr: None,
                 client_random_prefix: Some("aabbcc".to_string()),
+                destination_port: None,
                 action: RuleAction::Allow,
             }],
         };
@@ -274,6 +371,7 @@ mod tests {
         let rule = Rule {
             cidr: None,
             client_random_prefix: Some("a0b0/f0f0".to_string()), // prefix=a0b0, mask=f0f0
+            destination_port: None,
             action: RuleAction::Allow,
         };
 
@@ -300,6 +398,7 @@ mod tests {
         let rule = Rule {
             cidr: None,
             client_random_prefix: Some("12345678/ffff0000".to_string()),
+            destination_port: None,
             action: RuleAction::Allow,
         };
 
@@ -320,6 +419,7 @@ mod tests {
         let rule = Rule {
             cidr: None,
             client_random_prefix: Some("aabbcc/".to_string()), // Invalid: empty mask
+            destination_port: None,
             action: RuleAction::Allow,
         };
 
@@ -328,5 +428,171 @@ mod tests {
 
         // Should not match due to invalid format
         assert!(!rule.matches(&ip, Some(&client_random)));
+    }
+
+    #[test]
+    fn test_destination_port_single_rule_matching() {
+        let rule = Rule {
+            cidr: None,
+            client_random_prefix: None,
+            destination_port: Some("6969".to_string()),
+            action: RuleAction::Deny,
+        };
+
+        assert!(rule.matches_destination_port(6969));
+        assert!(!rule.matches_destination_port(6968));
+        assert!(!rule.matches_destination_port(80));
+    }
+
+    #[test]
+    fn test_destination_port_range_rule_matching() {
+        let rule = Rule {
+            cidr: None,
+            client_random_prefix: None,
+            destination_port: Some("6881-6889".to_string()),
+            action: RuleAction::Deny,
+        };
+
+        assert!(rule.matches_destination_port(6881));
+        assert!(rule.matches_destination_port(6885));
+        assert!(rule.matches_destination_port(6889));
+        assert!(!rule.matches_destination_port(6880));
+        assert!(!rule.matches_destination_port(6890));
+        assert!(!rule.matches_destination_port(443));
+    }
+
+    #[test]
+    fn test_destination_port_invalid_rule_matching() {
+        // Invalid port format — rule should never match
+        let rule_text = Rule {
+            cidr: None,
+            client_random_prefix: None,
+            destination_port: Some("abc".to_string()),
+            action: RuleAction::Deny,
+        };
+        assert!(!rule_text.matches_destination_port(80));
+
+        // Reversed range — invalid, should never match
+        let rule_reversed = Rule {
+            cidr: None,
+            client_random_prefix: None,
+            destination_port: Some("6889-6881".to_string()),
+            action: RuleAction::Deny,
+        };
+        assert!(!rule_reversed.matches_destination_port(6885));
+
+        // Empty string — invalid, should never match
+        let rule_empty = Rule {
+            cidr: None,
+            client_random_prefix: None,
+            destination_port: Some("".to_string()),
+            action: RuleAction::Deny,
+        };
+        assert!(!rule_empty.matches_destination_port(80));
+    }
+
+    #[test]
+    fn test_evaluate_destination() {
+        let rules = RulesConfig {
+            rule: vec![
+                Rule {
+                    cidr: None,
+                    client_random_prefix: None,
+                    destination_port: Some("6881-6889".to_string()),
+                    action: RuleAction::Deny,
+                },
+                Rule {
+                    cidr: None,
+                    client_random_prefix: None,
+                    destination_port: Some("6969".to_string()),
+                    action: RuleAction::Deny,
+                },
+            ],
+        };
+
+        let engine = RulesEngine::from_config(rules);
+
+        assert_eq!(engine.evaluate_destination(6881), RuleEvaluation::Deny);
+        assert_eq!(engine.evaluate_destination(6885), RuleEvaluation::Deny);
+        assert_eq!(engine.evaluate_destination(6969), RuleEvaluation::Deny);
+        assert_eq!(engine.evaluate_destination(80), RuleEvaluation::Allow);
+        assert_eq!(engine.evaluate_destination(443), RuleEvaluation::Allow);
+    }
+
+    #[test]
+    fn test_evaluate_skips_destination_port_rules() {
+        let rules = RulesConfig {
+            rule: vec![
+                // This destination_port rule should be skipped at handshake
+                Rule {
+                    cidr: None,
+                    client_random_prefix: None,
+                    destination_port: Some("80".to_string()),
+                    action: RuleAction::Deny,
+                },
+                // This is a normal handshake rule
+                Rule {
+                    cidr: Some("10.0.0.0/8".to_string()),
+                    client_random_prefix: None,
+                    destination_port: None,
+                    action: RuleAction::Allow,
+                },
+            ],
+        };
+
+        let engine = RulesEngine::from_config(rules);
+        let ip = IpAddr::from_str("10.1.2.3").unwrap();
+
+        // Handshake evaluation should skip the destination_port rule and match the CIDR rule
+        assert_eq!(engine.evaluate(&ip, None), RuleEvaluation::Allow);
+
+        // Destination evaluation should match the destination_port rule
+        assert_eq!(engine.evaluate_destination(80), RuleEvaluation::Deny);
+        assert_eq!(engine.evaluate_destination(443), RuleEvaluation::Allow);
+    }
+
+    #[test]
+    fn test_mixed_rules_phases() {
+        let rules = RulesConfig {
+            rule: vec![
+                // Handshake: allow specific subnet
+                Rule {
+                    cidr: Some("192.168.1.0/24".to_string()),
+                    client_random_prefix: None,
+                    destination_port: None,
+                    action: RuleAction::Allow,
+                },
+                // Per-request: block torrent ports
+                Rule {
+                    cidr: None,
+                    client_random_prefix: None,
+                    destination_port: Some("6881-6889".to_string()),
+                    action: RuleAction::Deny,
+                },
+                // Handshake: catch-all deny
+                Rule {
+                    cidr: None,
+                    client_random_prefix: None,
+                    destination_port: None,
+                    action: RuleAction::Deny,
+                },
+            ],
+        };
+
+        let engine = RulesEngine::from_config(rules);
+
+        // Handshake: allowed subnet passes
+        let ip_allow = IpAddr::from_str("192.168.1.50").unwrap();
+        assert_eq!(engine.evaluate(&ip_allow, None), RuleEvaluation::Allow);
+
+        // Handshake: unknown subnet hits catch-all deny
+        let ip_deny = IpAddr::from_str("10.0.0.1").unwrap();
+        assert_eq!(engine.evaluate(&ip_deny, None), RuleEvaluation::Deny);
+
+        // Per-request: torrent port blocked
+        assert_eq!(engine.evaluate_destination(6881), RuleEvaluation::Deny);
+
+        // Per-request: normal port allowed
+        assert_eq!(engine.evaluate_destination(443), RuleEvaluation::Allow);
     }
 }

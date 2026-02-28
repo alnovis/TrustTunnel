@@ -198,6 +198,8 @@ fn generate_rules_toml_content(rules_config: &trusttunnel::rules::RulesConfig) -
     content.push_str(
         "#   Can optionally include a mask in format \"prefix[/mask]\" for bitwise matching\n",
     );
+    content.push_str("# - destination_port: Port or port range (e.g., \"6881\" or \"6881-6889\")\n");
+    content.push_str("#   Rules with destination_port are evaluated per-request, not at TLS handshake\n");
     content.push_str("# - action: \"allow\" or \"deny\"\n");
     content.push_str("#\n");
     content.push_str("# All fields except 'action' are optional - if specified, all conditions must match for the rule to apply.\n");
@@ -213,7 +215,11 @@ fn generate_rules_toml_content(rules_config: &trusttunnel::rules::RulesConfig) -
     content.push_str(
         "#    → matches client_random where (client_random & 0xf0f0) == (0xa0b0 & 0xf0f0)\n",
     );
-    content.push_str("#    → e.g., 0xa5b5, 0xa9bf match, but 0xb0b0, 0xa0c0 don't match\n\n");
+    content.push_str("#    → e.g., 0xa5b5, 0xa9bf match, but 0xb0b0, 0xa0c0 don't match\n");
+    content.push_str("#\n");
+    content.push_str("# Destination port filtering (evaluated per TCP CONNECT / UDP request):\n");
+    content.push_str("#    destination_port = \"6881-6889\"  → blocks port range\n");
+    content.push_str("#    destination_port = \"6969\"       → blocks single port\n\n");
 
     // Serialize the actual rules (usually empty)
     if !rules_config.rule.is_empty() {

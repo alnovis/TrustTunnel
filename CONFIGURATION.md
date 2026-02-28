@@ -235,6 +235,11 @@ action = "allow"
 cidr = "10.0.0.0/8"
 client_random_prefix = "a0b0/f0f0"
 action = "deny"
+
+# Block BitTorrent peer ports (evaluated per-request)
+[[rule]]
+destination_port = "6881-6889"
+action = "deny"
 ```
 
 ---
@@ -396,7 +401,7 @@ Each TLS host entry requires:
 
 ## Rules Reference
 
-Rules filter incoming connections based on client IP and/or TLS client random data.
+Rules filter incoming connections based on client IP, TLS client random data, and/or destination port.
 
 ### Rule Structure
 
@@ -404,11 +409,20 @@ Rules filter incoming connections based on client IP and/or TLS client random da
 [[rule]]
 cidr = "192.168.0.0/16"           # Optional: IP range in CIDR notation
 client_random_prefix = "aabbcc"   # Optional: Hex-encoded prefix or prefix/mask
+destination_port = "6881-6889"    # Optional: Port or port range
 action = "allow"                  # Required: "allow" or "deny"
 ```
 
-### Evaluation
+### Two-Phase Evaluation
 
+Rules are evaluated in two phases:
+
+Rules are evaluated at two points:
+
+- **At TLS handshake:** Checks `cidr` and `client_random_prefix`. Rules with `destination_port` are skipped.
+- **Per TCP CONNECT / UDP request:** Checks `destination_port`. Rules without `destination_port` are skipped.
+
+Within each evaluation:
 1. Rules are evaluated in order
 2. First matching rule's action is applied
 3. If no rules match, connection is **allowed** by default
@@ -434,6 +448,34 @@ client_random_prefix = "a0b0/f0f0"
 
 Matches if `(client_random & 0xf0f0) == (0xa0b0 & 0xf0f0)`.
 
+### Destination Port Filtering
+
+Destination port rules are evaluated per-request (not at TLS handshake time), since the destination is not known until a TCP CONNECT or UDP request is made.
+
+```toml
+# Block a single port
+[[rule]]
+destination_port = "6969"
+action = "deny"
+
+# Block a port range
+[[rule]]
+destination_port = "6881-6889"
+action = "deny"
+```
+
+**Anti-torrent example** — block common BitTorrent tracker and peer ports:
+
+```toml
+[[rule]]
+destination_port = "6881-6889"
+action = "deny"
+
+[[rule]]
+destination_port = "6969"
+action = "deny"
+```
+
 ### Examples
 
 ```toml
@@ -451,6 +493,15 @@ action = "allow"
 [[rule]]
 cidr = "10.0.0.0/8"
 client_random_prefix = "bad0/ff00"
+action = "deny"
+
+# Block BitTorrent ports
+[[rule]]
+destination_port = "6881-6889"
+action = "deny"
+
+[[rule]]
+destination_port = "6969"
 action = "deny"
 
 # Catch-all deny (place last)
