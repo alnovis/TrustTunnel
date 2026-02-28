@@ -11,6 +11,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --defau
 ENV PATH="/root/.cargo/bin:$PATH"
 # Copy source files
 WORKDIR $ENDPOINT_DIR_NAME
+COPY deeplink/ ./deeplink
 COPY endpoint/ ./endpoint
 COPY lib/ ./lib
 COPY macros/ ./macros
