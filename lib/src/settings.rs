@@ -1638,6 +1638,11 @@ where
                         .and_then(Item::as_str)
                         .map(|s| s.to_string());
 
+                    let destination_port = rule_table
+                        .get("destination_port")
+                        .and_then(Item::as_str)
+                        .map(|s| s.to_string());
+
                     let action = rule_table
                         .get("action")
                         .and_then(Item::as_str)
@@ -1650,6 +1655,7 @@ where
                     Some(rules::Rule {
                         cidr,
                         client_random_prefix,
+                        destination_port,
                         action,
                     })
                 })

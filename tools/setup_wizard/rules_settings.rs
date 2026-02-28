@@ -1,7 +1,7 @@
 use crate::get_mode;
 use crate::user_interaction::{ask_for_agreement, ask_for_input};
 use log::{info, warn};
-use trusttunnel::rules::{Rule, RuleAction, RulesConfig};
+use trusttunnel::rules::{DestinationPortFilter, Rule, RuleAction, RulesConfig};
 
 pub fn build() -> RulesConfig {
     match get_mode() {
@@ -32,6 +32,7 @@ fn build_interactive() -> RulesConfig {
     println!("  - Client IP address (CIDR notation, e.g., 192.168.1.0/24)");
     println!("  - TLS client random prefix (hex-encoded, e.g., aabbcc)");
     println!("  - TLS client random with mask for bitwise matching");
+    println!("  - Destination port or port range (e.g., 6881-6889)");
     println!("  - Both conditions together");
     println!();
 
@@ -44,7 +45,7 @@ fn add_custom_rules(rules: &mut Vec<Rule>) {
     println!();
     while ask_for_agreement("Add a custom rule?") {
         let rule_type = ask_for_input::<String>(
-            "Rule type (1=IP range, 2=client random prefix, 3=both)",
+            "Rule type (1=IP range, 2=client random prefix, 3=both, 4=destination port)",
             Some("1".to_string()),
         );
 
@@ -52,6 +53,7 @@ fn add_custom_rules(rules: &mut Vec<Rule>) {
             "1" => add_ip_rule(rules),
             "2" => add_client_random_rule(rules),
             "3" => add_combined_rule(rules),
+            "4" => add_destination_port_rule(rules),
             _ => {
                 warn!("Invalid choice. Skipping rule.");
                 continue;
@@ -78,6 +80,7 @@ fn add_ip_rule(rules: &mut Vec<Rule>) {
     rules.push(Rule {
         cidr: Some(cidr),
         client_random_prefix: None,
+        destination_port: None,
         action,
     });
 
@@ -124,6 +127,7 @@ fn add_client_random_rule(rules: &mut Vec<Rule>) {
     rules.push(Rule {
         cidr: None,
         client_random_prefix: Some(client_random_value),
+        destination_port: None,
         action,
     });
 
@@ -181,6 +185,31 @@ fn add_combined_rule(rules: &mut Vec<Rule>) {
     rules.push(Rule {
         cidr: Some(cidr),
         client_random_prefix: Some(client_random_value),
+        destination_port: None,
+        action,
+    });
+
+    info!("Rule added successfully.");
+}
+
+fn add_destination_port_rule(rules: &mut Vec<Rule>) {
+    let port_str = ask_for_input::<String>(
+        "Enter destination port or range (e.g., 6881 or 6881-6889)",
+        None,
+    );
+
+    // Validate port format
+    if let Err(e) = DestinationPortFilter::parse(&port_str) {
+        warn!("Invalid port format: {}. Skipping rule.", e);
+        return;
+    }
+
+    let action = ask_for_rule_action();
+
+    rules.push(Rule {
+        cidr: None,
+        client_random_prefix: None,
+        destination_port: Some(port_str),
         action,
     });
 
