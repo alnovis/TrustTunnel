@@ -476,18 +476,6 @@ destination_port = "6881-6889"
 action = "deny"
 ```
 
-**Anti-torrent example** — block common BitTorrent tracker and peer ports:
-
-```toml
-[[rule]]
-destination_port = "6881-6889"
-action = "deny"
-
-[[rule]]
-destination_port = "6969"
-action = "deny"
-```
-
 ### Examples
 
 ```toml
