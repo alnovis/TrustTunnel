@@ -1517,53 +1517,116 @@ where
         }
     };
 
-    let rules_config = match rules_doc.get("rule").and_then(Item::as_array_of_tables) {
-        Some(rules_array) => {
-            let rules: Vec<rules::Rule> = rules_array
-                .iter()
+    let rules_config = parse_rules_document(&rules_doc);
+
+    Ok(Some(rules::RulesEngine::from_config(rules_config)))
+}
+
+fn parse_action(table: &toml_edit::Table) -> Option<rules::RuleAction> {
+    table
+        .get("action")
+        .and_then(Item::as_str)
+        .and_then(|s| match s {
+            "allow" => Some(rules::RuleAction::Allow),
+            "deny" => Some(rules::RuleAction::Deny),
+            _ => None,
+        })
+}
+
+fn parse_default_action(table: &toml_edit::Table) -> Option<rules::RuleAction> {
+    table
+        .get("default_action")
+        .and_then(Item::as_str)
+        .and_then(|s| match s {
+            "allow" => Some(rules::RuleAction::Allow),
+            "deny" => Some(rules::RuleAction::Deny),
+            _ => None,
+        })
+}
+
+fn parse_rules_document(rules_doc: &Document) -> rules::RulesConfig {
+    let inbound = parse_inbound_section(rules_doc);
+    let outbound = parse_outbound_section(rules_doc);
+    rules::RulesConfig { inbound, outbound }
+}
+
+fn parse_inbound_section(rules_doc: &Document) -> rules::InboundRulesConfig {
+    let Some(inbound_item) = rules_doc.get("inbound") else {
+        return rules::InboundRulesConfig::default();
+    };
+    let Some(inbound_table) = inbound_item.as_table() else {
+        return rules::InboundRulesConfig::default();
+    };
+
+    let default_action = parse_default_action(inbound_table);
+
+    let rules = inbound_table
+        .get("rule")
+        .and_then(Item::as_array_of_tables)
+        .map(|arr| {
+            arr.iter()
                 .filter_map(|rule_table| {
+                    let action = parse_action(rule_table)?;
                     let cidr = rule_table
                         .get("cidr")
                         .and_then(Item::as_str)
                         .map(|s| s.to_string());
-
                     let client_random_prefix = rule_table
                         .get("client_random_prefix")
                         .and_then(Item::as_str)
                         .map(|s| s.to_string());
 
+                    Some(rules::InboundRule {
+                        cidr,
+                        client_random_prefix,
+                        action,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    rules::InboundRulesConfig {
+        default_action,
+        rule: rules,
+    }
+}
+
+fn parse_outbound_section(rules_doc: &Document) -> rules::OutboundRulesConfig {
+    let Some(outbound_item) = rules_doc.get("outbound") else {
+        return rules::OutboundRulesConfig::default();
+    };
+    let Some(outbound_table) = outbound_item.as_table() else {
+        return rules::OutboundRulesConfig::default();
+    };
+
+    let default_action = parse_default_action(outbound_table);
+
+    let rules = outbound_table
+        .get("rule")
+        .and_then(Item::as_array_of_tables)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|rule_table| {
+                    let action = parse_action(rule_table)?;
                     let destination_port = rule_table
                         .get("destination_port")
                         .and_then(Item::as_str)
-                        .map(|s| s.to_string());
+                        .map(|s| s.to_string())?;
 
-                    let action = rule_table
-                        .get("action")
-                        .and_then(Item::as_str)
-                        .and_then(|s| match s {
-                            "allow" => Some(rules::RuleAction::Allow),
-                            "deny" => Some(rules::RuleAction::Deny),
-                            _ => None,
-                        })?;
-
-                    Some(rules::Rule {
-                        cidr,
-                        client_random_prefix,
+                    Some(rules::OutboundRule {
                         destination_port,
                         action,
                     })
                 })
-                .collect();
+                .collect()
+        })
+        .unwrap_or_default();
 
-            rules::RulesConfig { rule: rules }
-        }
-        None => {
-            // No rules array found, create empty config
-            rules::RulesConfig { rule: vec![] }
-        }
-    };
-
-    Ok(Some(rules::RulesEngine::from_config(rules_config)))
+    rules::OutboundRulesConfig {
+        default_action,
+        rule: rules,
+    }
 }
 
 fn demangle_toml_string(x: String) -> String {
