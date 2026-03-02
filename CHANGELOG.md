@@ -1,5 +1,7 @@
 # CHANGELOG
 
+## 1.0.11
+
 - [Security] Fixed traffic leaking to local network via UDP, ICMP, and SOCKS5 forwarders
   when `allow_private_network_connections` is set to `false`.
     - Added `is_global_ip` check to UDP forwarder
