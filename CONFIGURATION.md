@@ -219,6 +219,7 @@ password = "secure_password_2"
 ### Rules File (rules.toml)
 
 Defines connection filtering rules. Rules are split into two independent sections:
+
 - `[inbound]` — client filtering (evaluated at TLS handshake)
 - `[outbound]` — destination filtering (evaluated per request)
 
