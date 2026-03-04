@@ -229,6 +229,8 @@ Example:
 
 ```toml
 [inbound]
+# WARNING: with default_action = "deny", all clients are blocked
+# unless explicitly allowed by a rule below.
 default_action = "deny"
 
 # Allow connections with specific TLS client random prefix
@@ -479,6 +481,8 @@ Matches if `(client_random & 0xf0f0) == (0xa0b0 & 0xf0f0)`.
 
 Outbound rules are evaluated per-request (not at TLS handshake time), since the destination is not known until a TCP CONNECT or UDP request is made.
 
+> **Note:** Currently outbound rules only support filtering by destination port. Filtering by destination hostname or IP address is not yet supported.
+
 ```toml
 [[outbound.rule]]
 destination_port = "6969"
@@ -492,7 +496,8 @@ action = "deny"
 ### Examples
 
 ```toml
-# Whitelist mode: only allow known clients
+# Whitelist mode: only allow known clients.
+# WARNING: all clients are blocked unless explicitly allowed below.
 [inbound]
 default_action = "deny"
 

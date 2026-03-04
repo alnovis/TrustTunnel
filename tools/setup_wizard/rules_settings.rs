@@ -192,15 +192,18 @@ fn add_destination_port_rule(rules: &mut Vec<OutboundRule>) {
         None,
     );
 
-    if let Err(e) = DestinationPortFilter::parse(&port_str) {
-        warn!("Invalid port format: {}. Skipping rule.", e);
-        return;
-    }
+    let destination_port = match DestinationPortFilter::parse(&port_str) {
+        Ok(filter) => filter,
+        Err(e) => {
+            warn!("Invalid port format: {}. Skipping rule.", e);
+            return;
+        }
+    };
 
     let action = ask_for_rule_action();
 
     rules.push(OutboundRule {
-        destination_port: port_str,
+        destination_port,
         action,
     });
 

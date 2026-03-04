@@ -1,5 +1,6 @@
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::net::IpAddr;
 
 /// Action to take when a rule matches
@@ -11,7 +12,8 @@ pub enum RuleAction {
 }
 
 /// Parsed destination port filter
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum DestinationPortFilter {
     Single(u16),
     Range(u16, u16),
@@ -54,6 +56,28 @@ impl DestinationPortFilter {
     }
 }
 
+impl fmt::Display for DestinationPortFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DestinationPortFilter::Single(p) => write!(f, "{}", p),
+            DestinationPortFilter::Range(start, end) => write!(f, "{}-{}", start, end),
+        }
+    }
+}
+
+impl TryFrom<String> for DestinationPortFilter {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::parse(&s)
+    }
+}
+
+impl From<DestinationPortFilter> for String {
+    fn from(f: DestinationPortFilter) -> String {
+        f.to_string()
+    }
+}
+
 /// Inbound filter rule (evaluated at TLS handshake)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundRule {
@@ -76,7 +100,7 @@ pub struct InboundRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboundRule {
     /// Destination port or port range to match (e.g. "6881" or "6881-6889")
-    pub destination_port: String,
+    pub destination_port: DestinationPortFilter,
 
     /// Action to take when this rule matches
     pub action: RuleAction,
@@ -200,10 +224,7 @@ impl InboundRule {
 impl OutboundRule {
     /// Check if the given port matches this rule's destination_port filter
     pub fn matches_port(&self, port: u16) -> bool {
-        match DestinationPortFilter::parse(&self.destination_port) {
-            Ok(filter) => filter.matches(port),
-            Err(_) => false, // Invalid filter doesn't match
-        }
+        self.destination_port.matches(port)
     }
 }
 
@@ -389,6 +410,9 @@ mod tests {
 
     #[test]
     fn test_client_random_mask_matching() {
+        // Bitwise matching: prefix=a0b0, mask=f0f0
+        // Match condition: (client_random & mask) == (prefix & mask)
+        // i.e. (client_random & 0xf0f0) == (0xa0b0 & 0xf0f0) == 0xa0b0
         let rule = InboundRule {
             cidr: None,
             client_random_prefix: Some("a0b0/f0f0".to_string()),
@@ -397,9 +421,13 @@ mod tests {
 
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
+        // a5b5 & f0f0 = a0b0 ✓
         let client_random_match1 = hex::decode("a5b5ccdd").unwrap();
+        // a9bf & f0f0 = a0b0 ✓
         let client_random_match2 = hex::decode("a9bfeeaa").unwrap();
+        // b0b0 & f0f0 = b0b0 ✗ (first nibble differs)
         let client_random_no_match1 = hex::decode("b0b01122").unwrap();
+        // a0c0 & f0f0 = a0c0 ✗ (second byte high nibble differs)
         let client_random_no_match2 = hex::decode("a0c03344").unwrap();
 
         assert!(rule.matches(&ip, Some(&client_random_match1)));
@@ -410,6 +438,7 @@ mod tests {
 
     #[test]
     fn test_client_random_mask_full_bytes() {
+        // Full byte mask: only first 2 bytes matter (mask=ffff0000)
         let rule = InboundRule {
             cidr: None,
             client_random_prefix: Some("12345678/ffff0000".to_string()),
@@ -418,7 +447,9 @@ mod tests {
 
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
+        // First 2 bytes are 0x1234, last 2 can be anything
         let client_random_match = hex::decode("1234aaaabbbb").unwrap();
+        // First 2 bytes are 0x1233 — doesn't match
         let client_random_no_match = hex::decode("12335678ccdd").unwrap();
 
         assert!(rule.matches(&ip, Some(&client_random_match)));
@@ -427,6 +458,7 @@ mod tests {
 
     #[test]
     fn test_client_random_invalid_mask_format() {
+        // Invalid format: slash without mask — should not match
         let rule = InboundRule {
             cidr: None,
             client_random_prefix: Some("aabbcc/".to_string()),
@@ -442,7 +474,7 @@ mod tests {
     #[test]
     fn test_destination_port_single_rule_matching() {
         let rule = OutboundRule {
-            destination_port: "6969".to_string(),
+            destination_port: DestinationPortFilter::Single(6969),
             action: RuleAction::Deny,
         };
 
@@ -454,7 +486,7 @@ mod tests {
     #[test]
     fn test_destination_port_range_rule_matching() {
         let rule = OutboundRule {
-            destination_port: "6881-6889".to_string(),
+            destination_port: DestinationPortFilter::Range(6881, 6889),
             action: RuleAction::Deny,
         };
 
@@ -467,24 +499,10 @@ mod tests {
     }
 
     #[test]
-    fn test_destination_port_invalid_rule_matching() {
-        let rule_text = OutboundRule {
-            destination_port: "abc".to_string(),
-            action: RuleAction::Deny,
-        };
-        assert!(!rule_text.matches_port(80));
-
-        let rule_reversed = OutboundRule {
-            destination_port: "6889-6881".to_string(),
-            action: RuleAction::Deny,
-        };
-        assert!(!rule_reversed.matches_port(6885));
-
-        let rule_empty = OutboundRule {
-            destination_port: "".to_string(),
-            action: RuleAction::Deny,
-        };
-        assert!(!rule_empty.matches_port(80));
+    fn test_destination_port_invalid_parse() {
+        assert!(DestinationPortFilter::parse("abc").is_err());
+        assert!(DestinationPortFilter::parse("6889-6881").is_err());
+        assert!(DestinationPortFilter::parse("").is_err());
     }
 
     #[test]
@@ -495,11 +513,11 @@ mod tests {
                 default_action: None,
                 rule: vec![
                     OutboundRule {
-                        destination_port: "6881-6889".to_string(),
+                        destination_port: DestinationPortFilter::Range(6881, 6889),
                         action: RuleAction::Deny,
                     },
                     OutboundRule {
-                        destination_port: "6969".to_string(),
+                        destination_port: DestinationPortFilter::Single(6969),
                         action: RuleAction::Deny,
                     },
                 ],
@@ -529,7 +547,7 @@ mod tests {
             outbound: OutboundRulesConfig {
                 default_action: Some(RuleAction::Allow),
                 rule: vec![OutboundRule {
-                    destination_port: "6881-6889".to_string(),
+                    destination_port: DestinationPortFilter::Range(6881, 6889),
                     action: RuleAction::Deny,
                 }],
             },

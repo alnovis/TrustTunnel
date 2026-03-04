@@ -1629,31 +1629,105 @@ where
 }
 
 fn parse_action(table: &toml_edit::Table) -> Option<rules::RuleAction> {
-    table
-        .get("action")
-        .and_then(Item::as_str)
-        .and_then(|s| match s {
-            "allow" => Some(rules::RuleAction::Allow),
-            "deny" => Some(rules::RuleAction::Deny),
-            _ => None,
-        })
+    let action_str = table.get("action").and_then(Item::as_str);
+    match action_str {
+        Some("allow") => Some(rules::RuleAction::Allow),
+        Some("deny") => Some(rules::RuleAction::Deny),
+        Some(other) => {
+            log::warn!(
+                "Skipping rule with invalid action '{}' (expected 'allow' or 'deny')",
+                other
+            );
+            None
+        }
+        None => {
+            log::warn!("Skipping rule without 'action' field");
+            None
+        }
+    }
 }
 
 fn parse_default_action(table: &toml_edit::Table) -> Option<rules::RuleAction> {
-    table
-        .get("default_action")
-        .and_then(Item::as_str)
-        .and_then(|s| match s {
-            "allow" => Some(rules::RuleAction::Allow),
-            "deny" => Some(rules::RuleAction::Deny),
-            _ => None,
-        })
+    let action_str = table.get("default_action").and_then(Item::as_str);
+    match action_str {
+        Some("allow") => Some(rules::RuleAction::Allow),
+        Some("deny") => Some(rules::RuleAction::Deny),
+        Some(other) => {
+            log::warn!(
+                "Invalid default_action '{}' (expected 'allow' or 'deny'), defaulting to allow",
+                other
+            );
+            None
+        }
+        None => None,
+    }
 }
 
 fn parse_rules_document(rules_doc: &Document) -> rules::RulesConfig {
-    let inbound = parse_inbound_section(rules_doc);
-    let outbound = parse_outbound_section(rules_doc);
-    rules::RulesConfig { inbound, outbound }
+    let has_new_format = rules_doc.get("inbound").is_some() || rules_doc.get("outbound").is_some();
+
+    if has_new_format {
+        let inbound = parse_inbound_section(rules_doc);
+        let outbound = parse_outbound_section(rules_doc);
+        return rules::RulesConfig { inbound, outbound };
+    }
+
+    // Fallback: legacy flat [[rule]] format (pre-v1.0.12)
+    if let Some(legacy_rules) = rules_doc.get("rule").and_then(Item::as_array_of_tables) {
+        log::warn!(
+            "rules.toml uses deprecated [[rule]] format. \
+             Please migrate to [inbound]/[outbound] sections. \
+             See CONFIGURATION.md for the new format."
+        );
+
+        let rules: Vec<rules::InboundRule> = legacy_rules
+            .iter()
+            .filter_map(|rule_table| {
+                let action = parse_action(rule_table)?;
+                let cidr = rule_table
+                    .get("cidr")
+                    .and_then(Item::as_str)
+                    .map(|s| s.to_string());
+                let client_random_prefix = rule_table
+                    .get("client_random_prefix")
+                    .and_then(Item::as_str)
+                    .map(|s| s.to_string());
+
+                if let Some(ref cidr_str) = cidr {
+                    if cidr_str.parse::<ipnet::IpNet>().is_err() {
+                        log::warn!("Skipping legacy rule with invalid CIDR '{}'", cidr_str);
+                        return None;
+                    }
+                }
+
+                if let Some(ref prefix) = client_random_prefix {
+                    if !validate_client_random_prefix(prefix) {
+                        log::warn!(
+                            "Skipping legacy rule with invalid client_random_prefix '{}'",
+                            prefix
+                        );
+                        return None;
+                    }
+                }
+
+                Some(rules::InboundRule {
+                    cidr,
+                    client_random_prefix,
+                    action,
+                })
+            })
+            .collect();
+
+        return rules::RulesConfig {
+            inbound: rules::InboundRulesConfig {
+                default_action: None,
+                rule: rules,
+            },
+            outbound: rules::OutboundRulesConfig::default(),
+        };
+    }
+
+    rules::RulesConfig::default()
 }
 
 fn parse_inbound_section(rules_doc: &Document) -> rules::InboundRulesConfig {
@@ -1681,6 +1755,23 @@ fn parse_inbound_section(rules_doc: &Document) -> rules::InboundRulesConfig {
                         .get("client_random_prefix")
                         .and_then(Item::as_str)
                         .map(|s| s.to_string());
+
+                    if let Some(ref cidr_str) = cidr {
+                        if cidr_str.parse::<ipnet::IpNet>().is_err() {
+                            log::warn!("Skipping inbound rule with invalid CIDR '{}'", cidr_str);
+                            return None;
+                        }
+                    }
+
+                    if let Some(ref prefix) = client_random_prefix {
+                        if !validate_client_random_prefix(prefix) {
+                            log::warn!(
+                                "Skipping inbound rule with invalid client_random_prefix '{}'",
+                                prefix
+                            );
+                            return None;
+                        }
+                    }
 
                     Some(rules::InboundRule {
                         cidr,
@@ -1715,10 +1806,22 @@ fn parse_outbound_section(rules_doc: &Document) -> rules::OutboundRulesConfig {
             arr.iter()
                 .filter_map(|rule_table| {
                     let action = parse_action(rule_table)?;
-                    let destination_port = rule_table
-                        .get("destination_port")
-                        .and_then(Item::as_str)
-                        .map(|s| s.to_string())?;
+                    let Some(port_str) = rule_table.get("destination_port").and_then(Item::as_str)
+                    else {
+                        log::warn!("Skipping outbound rule without 'destination_port' field");
+                        return None;
+                    };
+                    let destination_port = match rules::DestinationPortFilter::parse(port_str) {
+                        Ok(filter) => filter,
+                        Err(e) => {
+                            log::warn!(
+                                "Skipping outbound rule with invalid destination_port '{}': {}",
+                                port_str,
+                                e
+                            );
+                            return None;
+                        }
+                    };
 
                     Some(rules::OutboundRule {
                         destination_port,
@@ -1732,6 +1835,16 @@ fn parse_outbound_section(rules_doc: &Document) -> rules::OutboundRulesConfig {
     rules::OutboundRulesConfig {
         default_action,
         rule: rules,
+    }
+}
+
+fn validate_client_random_prefix(value: &str) -> bool {
+    if let Some(slash_pos) = value.find('/') {
+        let (prefix_part, mask_part) = value.split_at(slash_pos);
+        let mask_part = &mask_part[1..];
+        !mask_part.is_empty() && hex::decode(prefix_part).is_ok() && hex::decode(mask_part).is_ok()
+    } else {
+        hex::decode(value).is_ok()
     }
 }
 
