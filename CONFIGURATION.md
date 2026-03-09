@@ -254,6 +254,11 @@ action = "deny"
 [[outbound.rule]]
 destination_port = "6969"
 action = "deny"
+
+# Block connections to private networks
+[[outbound.rule]]
+destination_cidr = "10.0.0.0/8"
+action = "deny"
 ```
 
 ---
@@ -442,7 +447,8 @@ action = "allow"                  # Required: "allow" or "deny"
 default_action = "allow"          # Optional: "allow" (default) or "deny"
 
 [[outbound.rule]]
-destination_port = "6881-6889"    # Required: Port or port range
+destination_port = "6881-6889"    # Optional: Port or port range
+destination_cidr = "0.0.0.0/0"   # Optional: IP range in CIDR notation
 action = "deny"                   # Required: "allow" or "deny"
 ```
 
@@ -454,6 +460,8 @@ Within each section:
 2. First matching rule's action is applied
 3. If no rules match, `default_action` is used (`"allow"` if not set)
 4. Inbound: if both `cidr` and `client_random_prefix` are specified, both must match
+5. Outbound: if both `destination_port` and `destination_cidr` are specified, both must match
+6. Outbound: at least one of `destination_port` or `destination_cidr` must be present
 
 Inbound and outbound defaults are independent — an inbound `default_action = "deny"` does not affect outbound evaluation and vice versa.
 
@@ -477,21 +485,31 @@ client_random_prefix = "a0b0/f0f0"
 
 Matches if `(client_random & 0xf0f0) == (0xa0b0 & 0xf0f0)`.
 
-### Destination Port Filtering
+### Destination Filtering
 
 Outbound rules are evaluated per-request (not at TLS handshake time), since the destination is not known until a TCP CONNECT or UDP request is made.
 
-> **Note:** Currently outbound rules only support filtering by destination port. Filtering by destination hostname or IP address is not yet supported.
+Outbound rules support filtering by destination port, destination IP (CIDR), or both:
 
 ```toml
-[[outbound.rule]]
-destination_port = "6969"
-action = "deny"
-
+# Block by port only
 [[outbound.rule]]
 destination_port = "6881-6889"
 action = "deny"
+
+# Block by IP range only
+[[outbound.rule]]
+destination_cidr = "10.0.0.0/8"
+action = "deny"
+
+# Block by both (both must match)
+[[outbound.rule]]
+destination_cidr = "203.0.113.0/24"
+destination_port = "25"
+action = "deny"
 ```
+
+> **Note:** For TCP CONNECT requests with hostname destinations (not resolved to IP yet), `destination_cidr` rules will not match. Use `destination_port` for hostname-based connections.
 
 ### Examples
 
@@ -519,6 +537,19 @@ action = "deny"
 
 [[outbound.rule]]
 destination_port = "6969"
+action = "deny"
+
+# Block access to private networks
+[[outbound.rule]]
+destination_cidr = "10.0.0.0/8"
+action = "deny"
+
+[[outbound.rule]]
+destination_cidr = "172.16.0.0/12"
+action = "deny"
+
+[[outbound.rule]]
+destination_cidr = "192.168.0.0/16"
 action = "deny"
 ```
 

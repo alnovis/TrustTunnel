@@ -1806,25 +1806,48 @@ fn parse_outbound_section(rules_doc: &Document) -> rules::OutboundRulesConfig {
             arr.iter()
                 .filter_map(|rule_table| {
                     let action = parse_action(rule_table)?;
-                    let Some(port_str) = rule_table.get("destination_port").and_then(Item::as_str)
-                    else {
-                        log::warn!("Skipping outbound rule without 'destination_port' field");
+
+                    let destination_port = rule_table
+                        .get("destination_port")
+                        .and_then(Item::as_str)
+                        .map(|port_str| match rules::DestinationPortFilter::parse(port_str) {
+                            Ok(filter) => Some(filter),
+                            Err(e) => {
+                                log::warn!(
+                                    "Skipping outbound rule with invalid destination_port '{}': {}",
+                                    port_str,
+                                    e
+                                );
+                                None
+                            }
+                        })
+                        .unwrap_or(None);
+
+                    let destination_cidr = rule_table
+                        .get("destination_cidr")
+                        .and_then(Item::as_str)
+                        .map(|cidr_str| match cidr_str.parse::<ipnet::IpNet>() {
+                            Ok(cidr) => Some(cidr),
+                            Err(_) => {
+                                log::warn!(
+                                    "Skipping outbound rule with invalid destination_cidr '{}'",
+                                    cidr_str
+                                );
+                                None
+                            }
+                        })
+                        .unwrap_or(None);
+
+                    if destination_port.is_none() && destination_cidr.is_none() {
+                        log::warn!(
+                            "Skipping outbound rule without 'destination_port' or 'destination_cidr'"
+                        );
                         return None;
-                    };
-                    let destination_port = match rules::DestinationPortFilter::parse(port_str) {
-                        Ok(filter) => filter,
-                        Err(e) => {
-                            log::warn!(
-                                "Skipping outbound rule with invalid destination_port '{}': {}",
-                                port_str,
-                                e
-                            );
-                            return None;
-                        }
-                    };
+                    }
 
                     Some(rules::OutboundRule {
                         destination_port,
+                        destination_cidr,
                         action,
                     })
                 })

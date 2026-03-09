@@ -43,6 +43,10 @@ credentials_file = "{}"
 # destination_port = "6881-6889"
 # action = "deny"
 #
+# [[outbound.rule]]
+# destination_cidr = "10.0.0.0/8"
+# action = "deny"
+#
 # If no rules file, all connections are allowed by default.
 # ```
 rules_file = "{}"

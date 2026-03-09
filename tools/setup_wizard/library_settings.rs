@@ -204,6 +204,7 @@ fn generate_rules_toml_content(rules_config: &trusttunnel::rules::RulesConfig) -
     content.push_str("# Outbound rule fields:\n");
     content
         .push_str("#   destination_port - Port or port range (e.g., \"6881\" or \"6881-6889\")\n");
+    content.push_str("#   destination_cidr - IP range in CIDR notation (e.g., \"10.0.0.0/8\")\n");
     content.push_str("#   action - \"allow\" or \"deny\"\n\n");
 
     // [inbound] section
@@ -255,10 +256,12 @@ fn generate_rules_toml_content(rules_config: &trusttunnel::rules::RulesConfig) -
 
     for rule in &rules_config.outbound.rule {
         content.push_str("[[outbound.rule]]\n");
-        content.push_str(&format!(
-            "destination_port = \"{}\"\n",
-            rule.destination_port
-        ));
+        if let Some(ref port) = rule.destination_port {
+            content.push_str(&format!("destination_port = \"{}\"\n", port));
+        }
+        if let Some(cidr) = rule.destination_cidr {
+            content.push_str(&format!("destination_cidr = \"{}\"\n", cidr));
+        }
         content.push_str(&format!(
             "action = \"{}\"\n\n",
             match rule.action {

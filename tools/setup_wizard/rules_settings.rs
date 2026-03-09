@@ -33,6 +33,8 @@ fn build_interactive() -> RulesConfig {
     println!("    - TLS client random with mask for bitwise matching");
     println!("  [outbound] - Destination filtering (evaluated per request)");
     println!("    - Destination port or port range (e.g., 6881-6889)");
+    println!("    - Destination IP range in CIDR notation (e.g., 10.0.0.0/8)");
+    println!("    - Both port and IP (both must match)");
     println!();
 
     let inbound = build_inbound_section();
@@ -107,7 +109,20 @@ fn add_inbound_rules(rules: &mut Vec<InboundRule>) {
 
 fn add_outbound_rules(rules: &mut Vec<OutboundRule>) {
     while ask_for_agreement("Add an outbound rule?") {
-        add_destination_port_rule(rules);
+        let rule_type = ask_for_input::<String>(
+            "Rule type (1=destination port, 2=destination IP range, 3=both)",
+            Some("1".to_string()),
+        );
+
+        match rule_type.as_str() {
+            "1" => add_destination_port_rule(rules),
+            "2" => add_destination_cidr_rule(rules),
+            "3" => add_destination_combined_rule(rules),
+            _ => {
+                warn!("Invalid choice. Skipping rule.");
+                continue;
+            }
+        }
         println!();
     }
 }
@@ -203,11 +218,84 @@ fn add_destination_port_rule(rules: &mut Vec<OutboundRule>) {
     let action = ask_for_rule_action();
 
     rules.push(OutboundRule {
-        destination_port,
+        destination_port: Some(destination_port),
+        destination_cidr: None,
         action,
     });
 
     info!("Rule added successfully.");
+}
+
+fn add_destination_cidr_rule(rules: &mut Vec<OutboundRule>) {
+    let cidr_str = ask_for_input::<String>(
+        "Enter destination IP range in CIDR notation (e.g., 10.0.0.0/8)",
+        None,
+    );
+
+    let cidr = match cidr_str.parse::<ipnet::IpNet>() {
+        Ok(c) => c,
+        Err(_) => {
+            warn!("Invalid CIDR format. Skipping rule.");
+            return;
+        }
+    };
+
+    let action = ask_for_rule_action();
+
+    rules.push(OutboundRule {
+        destination_port: None,
+        destination_cidr: Some(cidr),
+        action,
+    });
+
+    info!("Rule added successfully.");
+}
+
+fn add_destination_combined_rule(rules: &mut Vec<OutboundRule>) {
+    let cidr_str = ask_for_input::<String>(
+        "Enter destination IP range in CIDR notation (e.g., 203.0.113.0/24)",
+        None,
+    );
+
+    let cidr = match cidr_str.parse::<ipnet::IpNet>() {
+        Ok(c) => c,
+        Err(_) => {
+            warn!("Invalid CIDR format. Skipping rule.");
+            return;
+        }
+    };
+
+    let port_str = ask_for_input::<String>(
+        "Enter destination port or range (e.g., 25 or 6881-6889)",
+        None,
+    );
+
+    let destination_port = match DestinationPortFilter::parse(&port_str) {
+        Ok(filter) => filter,
+        Err(e) => {
+            warn!("Invalid port format: {}. Skipping rule.", e);
+            return;
+        }
+    };
+
+    let action = ask_for_rule_action();
+
+    rules.push(OutboundRule {
+        destination_port: Some(destination_port),
+        destination_cidr: Some(cidr),
+        action,
+    });
+
+    info!("Rule added successfully.");
+}
+
+fn ask_for_rule_action() -> RuleAction {
+    let action_str = ask_for_input::<String>("Action (allow/deny)", Some("allow".to_string()));
+
+    match action_str.to_lowercase().as_str() {
+        "deny" => RuleAction::Deny,
+        _ => RuleAction::Allow,
+    }
 }
 
 fn validate_client_random(value: &str) -> bool {
@@ -235,13 +323,4 @@ fn validate_client_random(value: &str) -> bool {
     }
 
     true
-}
-
-fn ask_for_rule_action() -> RuleAction {
-    let action_str = ask_for_input::<String>("Action (allow/deny)", Some("allow".to_string()));
-
-    match action_str.to_lowercase().as_str() {
-        "deny" => RuleAction::Deny,
-        _ => RuleAction::Allow,
-    }
 }

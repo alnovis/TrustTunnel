@@ -100,10 +100,43 @@ pub struct InboundRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboundRule {
     /// Destination port or port range to match (e.g. "6881" or "6881-6889")
-    pub destination_port: DestinationPortFilter,
+    #[serde(default)]
+    pub destination_port: Option<DestinationPortFilter>,
+
+    /// Destination IP range, pre-parsed at config load time
+    #[serde(
+        default,
+        deserialize_with = "deserialize_cidr",
+        serialize_with = "serialize_cidr"
+    )]
+    pub destination_cidr: Option<IpNet>,
 
     /// Action to take when this rule matches
     pub action: RuleAction,
+}
+
+fn deserialize_cidr<'de, D>(deserializer: D) -> Result<Option<IpNet>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(s) => s
+            .parse::<IpNet>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
+fn serialize_cidr<S>(cidr: &Option<IpNet>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match cidr {
+        Some(net) => serializer.serialize_some(&net.to_string()),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Inbound rules configuration
@@ -222,9 +255,34 @@ impl InboundRule {
 }
 
 impl OutboundRule {
-    /// Check if the given port matches this rule's destination_port filter
+    /// Check if the given destination matches this rule's filters.
+    /// If both destination_port and destination_cidr are specified, both must match.
+    /// At least one filter must be present for the rule to be valid.
+    pub fn matches(&self, dest_ip: Option<&IpAddr>, port: u16) -> bool {
+        let mut has_filter = false;
+        let mut all_match = true;
+
+        if let Some(ref port_filter) = self.destination_port {
+            has_filter = true;
+            all_match &= port_filter.matches(port);
+        }
+
+        if let Some(ref cidr) = self.destination_cidr {
+            has_filter = true;
+            if let Some(ip) = dest_ip {
+                all_match &= cidr.contains(ip);
+            } else {
+                // No IP available but rule requires it
+                all_match = false;
+            }
+        }
+
+        has_filter && all_match
+    }
+
+    /// Check if the given port matches this rule's destination_port filter (legacy convenience)
     pub fn matches_port(&self, port: u16) -> bool {
-        self.destination_port.matches(port)
+        self.matches(None, port)
     }
 }
 
@@ -271,13 +329,13 @@ impl RulesEngine {
         }
     }
 
-    /// Evaluate destination port against outbound rules (per TCP CONNECT / UDP request).
+    /// Evaluate destination against outbound rules (per TCP CONNECT / UDP request).
     /// Returns the action from the first matching rule, or the default action (Allow if unset).
-    pub fn evaluate_destination(&self, port: u16) -> RuleEvaluation {
+    pub fn evaluate_destination(&self, dest_ip: Option<&IpAddr>, port: u16) -> RuleEvaluation {
         let outbound = &self.rules.outbound;
 
         for rule in &outbound.rule {
-            if rule.matches_port(port) {
+            if rule.matches(dest_ip, port) {
                 return match rule.action {
                     RuleAction::Allow => RuleEvaluation::Allow,
                     RuleAction::Deny => RuleEvaluation::Deny,
@@ -474,7 +532,8 @@ mod tests {
     #[test]
     fn test_destination_port_single_rule_matching() {
         let rule = OutboundRule {
-            destination_port: DestinationPortFilter::Single(6969),
+            destination_port: Some(DestinationPortFilter::Single(6969)),
+            destination_cidr: None,
             action: RuleAction::Deny,
         };
 
@@ -486,7 +545,8 @@ mod tests {
     #[test]
     fn test_destination_port_range_rule_matching() {
         let rule = OutboundRule {
-            destination_port: DestinationPortFilter::Range(6881, 6889),
+            destination_port: Some(DestinationPortFilter::Range(6881, 6889)),
+            destination_cidr: None,
             action: RuleAction::Deny,
         };
 
@@ -513,11 +573,13 @@ mod tests {
                 default_action: None,
                 rule: vec![
                     OutboundRule {
-                        destination_port: DestinationPortFilter::Range(6881, 6889),
+                        destination_port: Some(DestinationPortFilter::Range(6881, 6889)),
+                        destination_cidr: None,
                         action: RuleAction::Deny,
                     },
                     OutboundRule {
-                        destination_port: DestinationPortFilter::Single(6969),
+                        destination_port: Some(DestinationPortFilter::Single(6969)),
+                        destination_cidr: None,
                         action: RuleAction::Deny,
                     },
                 ],
@@ -526,11 +588,23 @@ mod tests {
 
         let engine = RulesEngine::from_config(rules);
 
-        assert_eq!(engine.evaluate_destination(6881), RuleEvaluation::Deny);
-        assert_eq!(engine.evaluate_destination(6885), RuleEvaluation::Deny);
-        assert_eq!(engine.evaluate_destination(6969), RuleEvaluation::Deny);
-        assert_eq!(engine.evaluate_destination(80), RuleEvaluation::Allow);
-        assert_eq!(engine.evaluate_destination(443), RuleEvaluation::Allow);
+        assert_eq!(
+            engine.evaluate_destination(None, 6881),
+            RuleEvaluation::Deny
+        );
+        assert_eq!(
+            engine.evaluate_destination(None, 6885),
+            RuleEvaluation::Deny
+        );
+        assert_eq!(
+            engine.evaluate_destination(None, 6969),
+            RuleEvaluation::Deny
+        );
+        assert_eq!(engine.evaluate_destination(None, 80), RuleEvaluation::Allow);
+        assert_eq!(
+            engine.evaluate_destination(None, 443),
+            RuleEvaluation::Allow
+        );
     }
 
     #[test]
@@ -547,7 +621,8 @@ mod tests {
             outbound: OutboundRulesConfig {
                 default_action: Some(RuleAction::Allow),
                 rule: vec![OutboundRule {
-                    destination_port: DestinationPortFilter::Range(6881, 6889),
+                    destination_port: Some(DestinationPortFilter::Range(6881, 6889)),
+                    destination_cidr: None,
                     action: RuleAction::Deny,
                 }],
             },
@@ -564,10 +639,16 @@ mod tests {
         assert_eq!(engine.evaluate(&ip_deny, None), RuleEvaluation::Deny);
 
         // Outbound: torrent port blocked
-        assert_eq!(engine.evaluate_destination(6881), RuleEvaluation::Deny);
+        assert_eq!(
+            engine.evaluate_destination(None, 6881),
+            RuleEvaluation::Deny
+        );
 
         // Outbound: normal port uses default allow
-        assert_eq!(engine.evaluate_destination(443), RuleEvaluation::Allow);
+        assert_eq!(
+            engine.evaluate_destination(None, 443),
+            RuleEvaluation::Allow
+        );
     }
 
     #[test]
@@ -596,8 +677,281 @@ mod tests {
         assert_eq!(engine.evaluate(&ip, None), RuleEvaluation::Deny);
 
         // Outbound: should still allow everything — inbound deny doesn't leak
-        assert_eq!(engine.evaluate_destination(80), RuleEvaluation::Allow);
-        assert_eq!(engine.evaluate_destination(443), RuleEvaluation::Allow);
-        assert_eq!(engine.evaluate_destination(6881), RuleEvaluation::Allow);
+        assert_eq!(engine.evaluate_destination(None, 80), RuleEvaluation::Allow);
+        assert_eq!(
+            engine.evaluate_destination(None, 443),
+            RuleEvaluation::Allow
+        );
+        assert_eq!(
+            engine.evaluate_destination(None, 6881),
+            RuleEvaluation::Allow
+        );
+    }
+
+    #[test]
+    fn test_destination_cidr_rule_matching() {
+        let rule = OutboundRule {
+            destination_port: None,
+            destination_cidr: Some("10.0.0.0/8".parse().unwrap()),
+            action: RuleAction::Deny,
+        };
+
+        let ip_match = IpAddr::from_str("10.1.2.3").unwrap();
+        let ip_no_match = IpAddr::from_str("8.8.8.8").unwrap();
+
+        assert!(rule.matches(Some(&ip_match), 443));
+        assert!(!rule.matches(Some(&ip_no_match), 443));
+        // No IP provided — CIDR rule can't match
+        assert!(!rule.matches(None, 443));
+    }
+
+    #[test]
+    fn test_destination_cidr_and_port_combined() {
+        let rule = OutboundRule {
+            destination_port: Some(DestinationPortFilter::Single(25)),
+            destination_cidr: Some("203.0.113.0/24".parse().unwrap()),
+            action: RuleAction::Deny,
+        };
+
+        let ip_match = IpAddr::from_str("203.0.113.50").unwrap();
+        let ip_no_match = IpAddr::from_str("8.8.8.8").unwrap();
+
+        // Both match
+        assert!(rule.matches(Some(&ip_match), 25));
+        // IP matches, port doesn't
+        assert!(!rule.matches(Some(&ip_match), 443));
+        // Port matches, IP doesn't
+        assert!(!rule.matches(Some(&ip_no_match), 25));
+        // Neither matches
+        assert!(!rule.matches(Some(&ip_no_match), 443));
+    }
+
+    #[test]
+    fn test_evaluate_destination_with_cidr() {
+        let rules = RulesConfig {
+            inbound: InboundRulesConfig::default(),
+            outbound: OutboundRulesConfig {
+                default_action: Some(RuleAction::Allow),
+                rule: vec![
+                    OutboundRule {
+                        destination_port: None,
+                        destination_cidr: Some("10.0.0.0/8".parse().unwrap()),
+                        action: RuleAction::Deny,
+                    },
+                    OutboundRule {
+                        destination_port: Some(DestinationPortFilter::Range(6881, 6889)),
+                        destination_cidr: None,
+                        action: RuleAction::Deny,
+                    },
+                ],
+            },
+        };
+
+        let engine = RulesEngine::from_config(rules);
+
+        let private_ip = IpAddr::from_str("10.1.2.3").unwrap();
+        let public_ip = IpAddr::from_str("8.8.8.8").unwrap();
+
+        // Private IP blocked on any port
+        assert_eq!(
+            engine.evaluate_destination(Some(&private_ip), 443),
+            RuleEvaluation::Deny
+        );
+        assert_eq!(
+            engine.evaluate_destination(Some(&private_ip), 80),
+            RuleEvaluation::Deny
+        );
+
+        // Public IP + torrent port blocked
+        assert_eq!(
+            engine.evaluate_destination(Some(&public_ip), 6881),
+            RuleEvaluation::Deny
+        );
+
+        // Public IP + normal port allowed
+        assert_eq!(
+            engine.evaluate_destination(Some(&public_ip), 443),
+            RuleEvaluation::Allow
+        );
+    }
+
+    #[test]
+    fn test_outbound_rule_without_filters_does_not_match() {
+        let rule = OutboundRule {
+            destination_port: None,
+            destination_cidr: None,
+            action: RuleAction::Deny,
+        };
+
+        let ip = IpAddr::from_str("8.8.8.8").unwrap();
+        assert!(!rule.matches(Some(&ip), 443));
+        assert!(!rule.matches(None, 443));
+    }
+
+    #[test]
+    fn test_port_only_rule_matches_regardless_of_ip() {
+        let rule = OutboundRule {
+            destination_port: Some(DestinationPortFilter::Single(6969)),
+            destination_cidr: None,
+            action: RuleAction::Deny,
+        };
+
+        let ip = IpAddr::from_str("8.8.8.8").unwrap();
+
+        // Port-only rule matches with IP provided
+        assert!(rule.matches(Some(&ip), 6969));
+        // Port-only rule matches without IP
+        assert!(rule.matches(None, 6969));
+        // Wrong port doesn't match
+        assert!(!rule.matches(Some(&ip), 443));
+    }
+
+    #[test]
+    fn test_cidr_rule_hostname_fallthrough() {
+        // CIDR-only rule with hostname destination (no IP) should NOT match,
+        // allowing the request to fall through to default_action
+        let rules = RulesConfig {
+            inbound: InboundRulesConfig::default(),
+            outbound: OutboundRulesConfig {
+                default_action: Some(RuleAction::Allow),
+                rule: vec![OutboundRule {
+                    destination_port: None,
+                    destination_cidr: Some("10.0.0.0/8".parse().unwrap()),
+                    action: RuleAction::Deny,
+                }],
+            },
+        };
+
+        let engine = RulesEngine::from_config(rules);
+
+        // No IP (hostname-based TCP CONNECT) — CIDR can't match, falls to default allow
+        assert_eq!(engine.evaluate_destination(None, 80), RuleEvaluation::Allow);
+
+        // With matching IP — denied
+        let private_ip = IpAddr::from_str("10.1.2.3").unwrap();
+        assert_eq!(
+            engine.evaluate_destination(Some(&private_ip), 80),
+            RuleEvaluation::Deny
+        );
+    }
+
+    #[test]
+    fn test_cidr_rule_hostname_fallthrough_default_deny() {
+        // With default_action = deny, hostname requests fall through to deny
+        let rules = RulesConfig {
+            inbound: InboundRulesConfig::default(),
+            outbound: OutboundRulesConfig {
+                default_action: Some(RuleAction::Deny),
+                rule: vec![OutboundRule {
+                    destination_port: None,
+                    destination_cidr: Some("8.0.0.0/8".parse().unwrap()),
+                    action: RuleAction::Allow,
+                }],
+            },
+        };
+
+        let engine = RulesEngine::from_config(rules);
+
+        // No IP — can't match CIDR allow rule, falls to default deny
+        assert_eq!(engine.evaluate_destination(None, 443), RuleEvaluation::Deny);
+
+        // With allowed IP — allowed
+        let ip = IpAddr::from_str("8.8.8.8").unwrap();
+        assert_eq!(
+            engine.evaluate_destination(Some(&ip), 443),
+            RuleEvaluation::Allow
+        );
+    }
+
+    #[test]
+    fn test_destination_cidr_allow_rule() {
+        // Whitelist mode: only allow specific destination subnets
+        let rules = RulesConfig {
+            inbound: InboundRulesConfig::default(),
+            outbound: OutboundRulesConfig {
+                default_action: Some(RuleAction::Deny),
+                rule: vec![OutboundRule {
+                    destination_port: None,
+                    destination_cidr: Some("93.184.0.0/16".parse().unwrap()),
+                    action: RuleAction::Allow,
+                }],
+            },
+        };
+
+        let engine = RulesEngine::from_config(rules);
+
+        let allowed_ip = IpAddr::from_str("93.184.216.34").unwrap();
+        let blocked_ip = IpAddr::from_str("8.8.8.8").unwrap();
+
+        assert_eq!(
+            engine.evaluate_destination(Some(&allowed_ip), 443),
+            RuleEvaluation::Allow
+        );
+        assert_eq!(
+            engine.evaluate_destination(Some(&blocked_ip), 443),
+            RuleEvaluation::Deny
+        );
+    }
+
+    #[test]
+    fn test_first_match_wins_mixed_rules() {
+        // Order matters: first matching rule wins
+        let rules = RulesConfig {
+            inbound: InboundRulesConfig::default(),
+            outbound: OutboundRulesConfig {
+                default_action: Some(RuleAction::Deny),
+                rule: vec![
+                    // Rule 1: allow 8.8.8.8/32 on any port
+                    OutboundRule {
+                        destination_port: None,
+                        destination_cidr: Some("8.8.8.8/32".parse().unwrap()),
+                        action: RuleAction::Allow,
+                    },
+                    // Rule 2: deny port 53
+                    OutboundRule {
+                        destination_port: Some(DestinationPortFilter::Single(53)),
+                        destination_cidr: None,
+                        action: RuleAction::Deny,
+                    },
+                ],
+            },
+        };
+
+        let engine = RulesEngine::from_config(rules);
+        let google_dns = IpAddr::from_str("8.8.8.8").unwrap();
+        let other_dns = IpAddr::from_str("1.1.1.1").unwrap();
+
+        // 8.8.8.8:53 — matches rule 1 first (allow), rule 2 never reached
+        assert_eq!(
+            engine.evaluate_destination(Some(&google_dns), 53),
+            RuleEvaluation::Allow
+        );
+        // 1.1.1.1:53 — doesn't match rule 1, matches rule 2 (deny)
+        assert_eq!(
+            engine.evaluate_destination(Some(&other_dns), 53),
+            RuleEvaluation::Deny
+        );
+        // 1.1.1.1:443 — doesn't match any, falls to default deny
+        assert_eq!(
+            engine.evaluate_destination(Some(&other_dns), 443),
+            RuleEvaluation::Deny
+        );
+    }
+
+    #[test]
+    fn test_destination_cidr_ipv6() {
+        let rule = OutboundRule {
+            destination_port: None,
+            destination_cidr: Some("2001:db8::/32".parse().unwrap()),
+            action: RuleAction::Deny,
+        };
+
+        let ipv6_match = IpAddr::from_str("2001:db8::1").unwrap();
+        let ipv6_no_match = IpAddr::from_str("2001:db9::1").unwrap();
+        let ipv4 = IpAddr::from_str("8.8.8.8").unwrap();
+
+        assert!(rule.matches(Some(&ipv6_match), 443));
+        assert!(!rule.matches(Some(&ipv6_no_match), 443));
+        assert!(!rule.matches(Some(&ipv4), 443));
     }
 }

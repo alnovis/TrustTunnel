@@ -330,22 +330,23 @@ impl Tunnel {
             }
         };
 
-        // Evaluate destination port filtering rules
+        // Evaluate destination filtering rules (port and/or IP)
         if let Some(rules_engine) = &context.settings.rules_engine {
-            let port = match &destination {
-                net_utils::TcpDestination::Address(addr) => addr.port(),
-                net_utils::TcpDestination::HostName((_, port)) => *port,
+            let (dest_ip, port) = match &destination {
+                net_utils::TcpDestination::Address(addr) => (Some(addr.ip()), addr.port()),
+                net_utils::TcpDestination::HostName((_, port)) => (None, *port),
             };
-            if rules_engine.evaluate_destination(port) == rules::RuleEvaluation::Deny {
+            if rules_engine.evaluate_destination(dest_ip.as_ref(), port)
+                == rules::RuleEvaluation::Deny
+            {
                 log_id!(
                     debug,
                     request_id,
-                    "TCP connect denied: destination port {} blocked by filtering rules",
-                    port
+                    "TCP connect denied: destination blocked by filtering rules",
                 );
                 return Err((
                     Some(request),
-                    "Destination port denied",
+                    "Destination denied",
                     ConnectionError::DestinationDenied,
                 ));
             }

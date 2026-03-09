@@ -188,13 +188,19 @@ impl forwarder::UdpDatagramPipeShared for MultiplexerShared {
         {
             Entry::Occupied(_) => Err(io::Error::new(ErrorKind::Other, "Already present")),
             Entry::Vacant(e) => {
-                // Evaluate destination port filtering rules
+                // Evaluate destination filtering rules (port and/or IP)
                 if let Some(rules_engine) = &self.context.settings.rules_engine {
+                    let dest_ip = meta.destination.ip();
                     let port = meta.destination.port();
-                    if rules_engine.evaluate_destination(port) == rules::RuleEvaluation::Deny {
+                    if rules_engine.evaluate_destination(Some(&dest_ip), port)
+                        == rules::RuleEvaluation::Deny
+                    {
                         return Err(io::Error::new(
                             ErrorKind::PermissionDenied,
-                            format!("UDP destination port {} denied by filtering rules", port),
+                            format!(
+                                "UDP destination {}:{} denied by filtering rules",
+                                dest_ip, port
+                            ),
                         ));
                     }
                 }
