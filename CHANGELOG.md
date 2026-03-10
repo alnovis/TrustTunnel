@@ -1,5 +1,9 @@
 # CHANGELOG
 
+- [Fix]     Reverse proxy routing for H2/H3.
+- [Feature] Add `ping_enable`, `ping_path`, `speedtest_enable` and `speedtest_path` config keys to configure ping and speedtest handlers.
+- [Feature] Add `auth_failure_status_code` config key to control the HTTP status code returned on authentication failure (407 or 405). Defaults to 407.
+
 ## 1.0.16
 
 - [Fix] HTTP/1.1 codec busy loop when receiving partial request headers.

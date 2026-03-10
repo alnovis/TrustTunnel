@@ -28,10 +28,14 @@ pub enum ValidationError {
     ReverseProxy(String),
     /// Invalid [`Settings.listen_protocols`]
     ListenProtocols(String),
+    /// Invalid request path configuration
+    InvalidPath(String),
     /// Invalid rules file
     RulesFile(String),
     /// No credentials configured while listening on a public address
     NoCredentialsOnPublicAddress,
+    /// Invalid auth failure status code
+    InvalidAuthFailureStatusCode(u16),
 }
 
 impl Debug for ValidationError {
@@ -43,11 +47,17 @@ impl Debug for ValidationError {
             Self::SpeedTlsHostInfo(x) => write!(f, "Invalid speedtest TLS hosts: {}", x),
             Self::ReverseProxy(x) => write!(f, "Invalid reverse proxy settings: {}", x),
             Self::ListenProtocols(x) => write!(f, "Invalid listen protocols settings: {}", x),
+            Self::InvalidPath(x) => write!(f, "Invalid request path: {}", x),
             Self::RulesFile(x) => write!(f, "Invalid rules file: {}", x),
             Self::NoCredentialsOnPublicAddress => write!(
                 f,
                 "No credentials configured (credentials_file is missing) while listening on a public address. \
                 This is a security risk. Either configure credentials or use a loopback address (127.0.0.1 or ::1)"
+            ),
+            Self::InvalidAuthFailureStatusCode(code) => write!(
+                f,
+                "Invalid auth_failure_status_code: {}. Supported values: 407, 405",
+                code
             ),
         }
     }
@@ -175,9 +185,23 @@ pub struct Settings {
     #[serde(deserialize_with = "deserialize_rules")]
     pub(crate) rules_engine: Option<rules::RulesEngine>,
 
-    /// Whether speedtest is available on the main hosts via `/speed` path.
+    /// Whether speedtest is available on the main hosts.
     #[serde(default = "Settings::default_speedtest_enable")]
     pub(crate) speedtest_enable: bool,
+    /// Whether ping is available on the main hosts.
+    #[serde(default = "Settings::default_ping_enable")]
+    pub(crate) ping_enable: bool,
+    /// Optional path prefix for ping requests on main hosts.
+    #[serde(default = "Settings::default_ping_path")]
+    pub(crate) ping_path: Option<String>,
+    /// Optional path prefix for speedtest requests on main hosts.
+    #[serde(default = "Settings::default_speedtest_path")]
+    pub(crate) speedtest_path: Option<String>,
+
+    /// HTTP status code returned on authentication failure.
+    /// Supported values: 407 (Proxy Authentication Required) or 405 (Method Not Allowed).
+    #[serde(default = "Settings::default_auth_failure_status_code")]
+    pub(crate) auth_failure_status_code: u16,
 
     /// Default maximum number of simultaneous HTTP/1 and HTTP/2 connections per client credentials.
     /// TrustTunnel clients open 8 HTTP/2 connections by default, so set this to
@@ -500,6 +524,10 @@ impl Settings {
             .map(ReverseProxySettings::validate)
             .transpose()?;
 
+        Self::validate_request_path("ping_path", &self.ping_path)?;
+        Self::validate_request_path("speedtest_path", &self.speedtest_path)?;
+        Self::validate_request_path_overlaps(&self.ping_path, &self.speedtest_path)?;
+
         if self.listen_protocols.http1.is_none()
             && self.listen_protocols.http2.is_none()
             && self.listen_protocols.quic.is_none()
@@ -510,6 +538,12 @@ impl Settings {
         // Do not start the endpoint without credentials on a public address
         if self.clients.is_empty() && !self.listen_address.ip().is_loopback() {
             return Err(ValidationError::NoCredentialsOnPublicAddress);
+        }
+
+        if self.auth_failure_status_code != 407 && self.auth_failure_status_code != 405 {
+            return Err(ValidationError::InvalidAuthFailureStatusCode(
+                self.auth_failure_status_code,
+            ));
         }
 
         Ok(())
@@ -550,6 +584,46 @@ impl Settings {
     pub fn default_speedtest_enable() -> bool {
         false
     }
+
+    pub fn default_speedtest_path() -> Option<String> {
+        Some("/speedtest".to_string())
+    }
+
+    pub fn default_ping_enable() -> bool {
+        false
+    }
+
+    pub fn default_ping_path() -> Option<String> {
+        Some("/ping".to_string())
+    }
+
+    pub fn default_auth_failure_status_code() -> u16 {
+        407
+    }
+
+    fn validate_request_path(name: &str, path: &Option<String>) -> Result<(), ValidationError> {
+        if let Some(path) = path {
+            if path.is_empty() || !path.starts_with('/') {
+                return Err(ValidationError::InvalidPath(format!("{name}: {path}")));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_request_path_overlaps(
+        left: &Option<String>,
+        right: &Option<String>,
+    ) -> Result<(), ValidationError> {
+        let (Some(left), Some(right)) = (left.as_ref(), right.as_ref()) else {
+            return Ok(());
+        };
+        if left == right || left.starts_with(right) || right.starts_with(left) {
+            return Err(ValidationError::InvalidPath(format!(
+                "path overlap: {left} vs {right}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -576,8 +650,12 @@ impl Default for Settings {
             metrics: Default::default(),
             rules_engine: Some(rules::RulesEngine::default_allow()),
             speedtest_enable: false,
+            ping_enable: Settings::default_ping_enable(),
+            ping_path: None,
+            speedtest_path: None,
             default_max_http2_conns_per_client: None,
             default_max_http3_conns_per_client: None,
+            auth_failure_status_code: Settings::default_auth_failure_status_code(),
             built: false,
         }
     }
@@ -832,8 +910,12 @@ impl SettingsBuilder {
                 metrics: Default::default(),
                 rules_engine: Some(rules::RulesEngine::default_allow()),
                 speedtest_enable: Settings::default_speedtest_enable(),
+                ping_enable: Settings::default_ping_enable(),
+                ping_path: Settings::default_ping_path(),
+                speedtest_path: Settings::default_speedtest_path(),
                 default_max_http2_conns_per_client: None,
                 default_max_http3_conns_per_client: None,
+                auth_failure_status_code: Settings::default_auth_failure_status_code(),
                 built: true,
             },
         }
@@ -964,6 +1046,30 @@ impl SettingsBuilder {
     /// Set the default maximum HTTP/3 connections per client credentials
     pub fn default_max_http3_conns_per_client(mut self, x: Option<u32>) -> Self {
         self.settings.default_max_http3_conns_per_client = x;
+        self
+    }
+
+    /// Set the HTTP status code for authentication failures (407 or 405)
+    pub fn auth_failure_status_code(mut self, x: u16) -> Self {
+        self.settings.auth_failure_status_code = x;
+        self
+    }
+
+    /// Set whether ping is available
+    pub fn ping_enable(mut self, x: bool) -> Self {
+        self.settings.ping_enable = x;
+        self
+    }
+
+    /// Set path prefix for ping requests on main hosts
+    pub fn ping_path<S: Into<String>>(mut self, path: S) -> Self {
+        self.settings.ping_path = Some(path.into());
+        self
+    }
+
+    /// Set path prefix for speedtest requests on main hosts
+    pub fn speedtest_path<S: Into<String>>(mut self, path: S) -> Self {
+        self.settings.speedtest_path = Some(path.into());
         self
     }
 }
@@ -1562,4 +1668,43 @@ where
 
 fn demangle_toml_string(x: String) -> String {
     x.replace('"', "").trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_auth_failure_status_code_is_407() {
+        let settings = Settings::default();
+        assert_eq!(settings.auth_failure_status_code, 407);
+    }
+
+    #[test]
+    fn auth_failure_status_code_407_valid() {
+        let mut settings = Settings::default();
+        settings.auth_failure_status_code = 407;
+        settings.listen_address = (Ipv4Addr::LOCALHOST, 8443).into();
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn auth_failure_status_code_405_valid() {
+        let mut settings = Settings::default();
+        settings.auth_failure_status_code = 405;
+        settings.listen_address = (Ipv4Addr::LOCALHOST, 8443).into();
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn auth_failure_status_code_200_invalid() {
+        let mut settings = Settings::default();
+        settings.auth_failure_status_code = 200;
+        settings.listen_address = (Ipv4Addr::LOCALHOST, 8443).into();
+        let err = settings.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::InvalidAuthFailureStatusCode(200)
+        ));
+    }
 }

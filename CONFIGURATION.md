@@ -247,18 +247,25 @@ action = "deny"
 
 ### Core Settings
 
-| Setting | Type | Default | Description |
-| ------- | ---- | ------- | ----------- |
-| `listen_address` | String | `0.0.0.0:443` | Address and port to listen on |
-| `ipv6_available` | Boolean | `true` | Whether IPv6 connections can be routed |
-| `allow_private_network_connections` | Boolean | `false` | Allow connections to endpoint's private network |
-| `tls_handshake_timeout_secs` | Integer | `10` | TLS handshake timeout in seconds |
-| `client_listener_timeout_secs` | Integer | `600` | Client listener timeout in seconds (10 minutes) |
-| `connection_establishment_timeout_secs` | Integer | `30` | Outgoing connection timeout in seconds |
-| `tcp_connections_timeout_secs` | Integer | `604800` | Idle TCP connection timeout (1 week) |
-| `udp_connections_timeout_secs` | Integer | `300` | UDP connection timeout (5 minutes) |
-| `credentials_file` | String | - | Path to credentials file |
-| `rules_file` | String | - | Path to rules file (optional) |
+| Setting                                 | Type    | Default       | Description                                                      |
+|-----------------------------------------|---------|---------------|------------------------------------------------------------------|
+| `listen_address`                        | String  | `0.0.0.0:443` | Address and port to listen on                                    |
+| `ipv6_available`                        | Boolean | `true`        | Whether IPv6 connections can be routed                           |
+| `allow_private_network_connections`     | Boolean | `false`       | Allow connections to endpoint's private network                  |
+| `tls_handshake_timeout_secs`            | Integer | `10`          | TLS handshake timeout in seconds                                 |
+| `client_listener_timeout_secs`          | Integer | `600`         | Client listener timeout in seconds (10 minutes)                  |
+| `connection_establishment_timeout_secs` | Integer | `30`          | Outgoing connection timeout in seconds                           |
+| `tcp_connections_timeout_secs`          | Integer | `604800`      | Idle TCP connection timeout (1 week)                             |
+| `udp_connections_timeout_secs`          | Integer | `300`         | UDP connection timeout (5 minutes)                               |
+| `credentials_file`                      | String  | -             | Path to credentials file                                         |
+| `rules_file`                            | String  | -             | Path to rules file (optional)                                    |
+| `speedtest_enable`                      | Boolean | `false`       | Enable speedtest handler on main hosts                           |
+| `ping_enable`                           | Boolean | `false`       | Enable ping handler on main hosts                                |
+| `ping_path`                             | String  | -             | Optional path prefix for ping on main hosts                      |
+| `speedtest_path`                        | String  | -             | Optional path prefix for speedtest on main hosts                 |
+| `auth_failure_status_code`              | Integer | `407`         | HTTP status code returned on authentication failure (405 or 407) |
+
+Ping and speedtest are matched only via their configured paths. Default paths are: `/ping` and `/speedtest`.
 
 ### Listen Protocol Settings
 
